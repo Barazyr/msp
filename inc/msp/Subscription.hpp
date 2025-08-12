@@ -5,6 +5,7 @@
 #include "Client.hpp"
 #include "Message.hpp"
 #include "PeriodicTimer.hpp"
+#include "SharedTimerManager.hpp"
 
 namespace msp {
 namespace client {
@@ -28,7 +29,7 @@ public:
      * @returns True if the request happens automatically
      */
     bool isAutomatic() const {
-        return hasTimer() && (timer_->getPeriod() > 0.0);
+        return shared_task_id_ > 0;
     }
 
     /**
@@ -41,27 +42,57 @@ public:
      * @brief Start the timer for automatic execution
      * @returns True if the timer starts successfully
      */
-    bool start() const { return hasTimer() && this->timer_->start(); }
+    bool start() const { 
+        if (shared_task_id_ > 0) {
+            return true; // Already using shared timer
+        }
+        return hasTimer() && this->timer_->start(); 
+    }
 
     /**
      * @brief Stop the timer's automatic execution
      * @returns True if the timer stops successfully
      */
-    bool stop() const { return hasTimer() && this->timer_->stop(); }
+    bool stop() const { 
+        if (shared_task_id_ > 0) {
+            return SharedTimerManager::getInstance().removeTask(shared_task_id_);
+        }
+        return hasTimer() && this->timer_->stop(); 
+    }
 
     /**
      * @brief setTimerPeriod change the period of the timer
      * @param period_seconds period in seconds
      */
     void setTimerPeriod(const double& period_seconds) {
+        // Remove existing shared timer task
+        if (shared_task_id_ > 0) {
+            SharedTimerManager::getInstance().removeTask(shared_task_id_);
+            shared_task_id_ = 0;
+        }
+        
         if(timer_) {
             timer_->setPeriod(period_seconds);
         }
         else if(period_seconds > 0.0) {
-            timer_ = std::unique_ptr<PeriodicTimer>(new PeriodicTimer(
+            // Use shared timer for better performance
+            auto& timer_mgr = SharedTimerManager::getInstance();
+            if (!timer_mgr.isRunning()) {
+                timer_mgr.start();
+            }
+            
+            shared_task_id_ = timer_mgr.scheduleTask(
                 std::bind(&SubscriptionBase::makeRequest, this),
-                period_seconds));
-            this->timer_->start();
+                period_seconds
+            );
+            
+            // Fallback to individual timer if shared timer fails
+            if (shared_task_id_ == 0) {
+                timer_ = std::unique_ptr<PeriodicTimer>(new PeriodicTimer(
+                    std::bind(&SubscriptionBase::makeRequest, this),
+                    period_seconds));
+                this->timer_->start();
+            }
         }
     }
 
@@ -70,19 +101,14 @@ public:
      * @param rate_hz frequency in Hz
      */
     void setTimerFrequency(const double& rate_hz) {
-        if(timer_) {
-            timer_->setPeriod(1.0 / rate_hz);
-        }
-        else if(rate_hz > 0.0) {
-            timer_ = std::unique_ptr<PeriodicTimer>(new PeriodicTimer(
-                std::bind(&SubscriptionBase::makeRequest, this),
-                1.0 / rate_hz));
-            this->timer_->start();
+        if(rate_hz > 0.0) {
+            setTimerPeriod(1.0 / rate_hz);
         }
     }
 
 protected:
     std::unique_ptr<PeriodicTimer> timer_;
+    mutable size_t shared_task_id_ = 0;  // ID for shared timer task
 };
 
 template <typename T> class Subscription : public SubscriptionBase {
@@ -108,9 +134,7 @@ public:
         send_callback_(send_callback),
         io_object_(std::move(io_object)) {
         if(period > 0.0) {
-            timer_ = std::unique_ptr<PeriodicTimer>(new PeriodicTimer(
-                std::bind(&Subscription<T>::makeRequest, this), period));
-            this->timer_->start();
+            setTimerPeriod(period);  // Use the improved shared timer approach
         }
     }
 

@@ -1,6 +1,9 @@
 #include <Client.hpp>
 #include <cstdlib>
 #include <iostream>
+#ifdef __linux__
+#include <unistd.h>  // For nice()
+#endif
 
 typedef unsigned int uint;
 
@@ -119,6 +122,22 @@ bool Client::startReadThread() {
     if(running_.test_and_set()) return false;
     // hit it!
     thread = std::thread([this] {
+#ifdef __linux__
+        // Lower MSP I/O thread priority to prevent CPU starvation of application threads
+        struct sched_param param;
+        param.sched_priority = 0;  // Lowest priority for SCHED_OTHER
+        if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &param) != 0) {
+            if (log_level_ >= WARNING)
+                std::cerr << "Warning: Could not set MSP thread priority" << std::endl;
+        }
+        
+        // Set nice value to further reduce priority
+        if (nice(5) == -1) {  // Lower priority by 5
+            if (log_level_ >= WARNING)
+                std::cerr << "Warning: Could not set MSP thread nice value" << std::endl;
+        }
+#endif
+        
         while (running_.test_and_set()) {
             try {
                 if (log_level_ >= DEBUG)
@@ -136,6 +155,10 @@ bool Client::startReadThread() {
                                          std::placeholders::_2));
 
                 io.run();
+                
+                // Yield CPU to prevent starving other threads
+                std::this_thread::yield();
+                
                 // io.run might finish immidiatly
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             } catch (const std::exception &err) {
@@ -172,6 +195,12 @@ bool Client::stopReadThread() {
 }
 
 bool Client::startSubscriptions() {
+    // Start the shared timer manager
+    auto& timer_mgr = msp::SharedTimerManager::getInstance();
+    if (!timer_mgr.isRunning()) {
+        timer_mgr.start();
+    }
+    
     bool rc = true;
     for(const auto& sub : subscriptions) {
         rc &= sub.second->start();
@@ -187,6 +216,13 @@ bool Client::stopSubscriptions() {
     for(const auto& sub : subscriptions) {
         rc &= sub.second->stop();
     }
+    
+    // Stop shared timer manager if no more subscriptions
+    if (subscriptions.empty()) {
+        auto& timer_mgr = msp::SharedTimerManager::getInstance();
+        timer_mgr.stop();
+    }
+    
     return rc;
 }
 
@@ -448,6 +484,9 @@ void Client::processOneMessage(const asio::error_code& ec,
                 ->decode(request_received->payload);
         }
     }
+
+    // Yield CPU after processing each message to prevent thread starvation
+    std::this_thread::yield();
 
     asio::async_read_until(port,
                            buffer,

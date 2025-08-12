@@ -8,10 +8,15 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#endif
 #include "ByteVector.hpp"
 #include "FirmwareVariants.hpp"
 #include "Message.hpp"
 #include "Subscription.hpp"
+#include "SharedTimerManager.hpp"
 
 namespace msp {
 namespace client {

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -52,10 +53,12 @@ private:
     std::shared_ptr<std::thread> thread_ptr;
     std::function<void()> funct;
     std::chrono::duration<size_t, std::micro> period_us;
-    std::timed_mutex mutex_timer;
-    std::chrono::steady_clock::time_point tstart;
-
-    std::atomic_flag running_ = ATOMIC_FLAG_INIT;
+    
+    // Thread synchronization
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> stop_requested_{false};
 };
 
 }  // namespace msp
